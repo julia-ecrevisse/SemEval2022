@@ -1,6 +1,3 @@
-# check which gpu we're using
-!nvidia-smi
-
 !pip install simpletransformers
 !pip install tensorboardx
 
