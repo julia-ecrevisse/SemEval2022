@@ -1,0 +1,275 @@
+# check which gpu we're using
+!nvidia-smi
+
+!pip install simpletransformers
+!pip install tensorboardx
+
+from simpletransformers.classification import ClassificationModel, ClassificationArgs, MultiLabelClassificationModel, MultiLabelClassificationArgs
+from urllib import request
+import pandas as pd
+import logging
+import wandb #optimize
+import torch
+from collections import Counter
+from ast import literal_eval
+import os
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+model = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased")
+
+"""@inproceedings{perez-almendros2020dontpatronizeme,
+  title={Don’t Patronize Me! An Annotated Dataset with Patronizing and Condescending Language towards Vulnerable Communities},
+  author={Perez-Almendros, Carla and Espinosa-Anke, Luis and Schockaert, Steven},
+  booktitle={Proceedings of the 28th International Conference on Computational Linguistics},
+  pages={5891--5902},
+  year={2020}
+}
+"""
+
+# prepare logger
+logging.basicConfig(level=logging.INFO)
+
+transformers_logger = logging.getLogger("transformers")
+transformers_logger.setLevel(logging.WARNING)
+
+# check gpu
+cuda_available = torch.cuda.is_available()
+
+print('Cuda available? ',cuda_available)
+
+if cuda_available:
+  import tensorflow as tf
+  # Get the GPU device name.
+  device_name = tf.test.gpu_device_name()
+  # The device name should look like the following:
+  if device_name == '/device:GPU:0':
+      print('Found GPU at: {}'.format(device_name))
+  else:
+      raise SystemError('GPU device not found')
+
+"""# Fetch Don't Patronize Me! data manager module"""
+
+module_url = f"https://raw.githubusercontent.com/Perez-AlmendrosC/dontpatronizeme/master/semeval-2022/dont_patronize_me.py"
+module_name = module_url.split('/')[-1]
+print(f'Fetching {module_url}')
+#with open("file_1.txt") as f1, open("file_2.txt") as f2
+with request.urlopen(module_url) as f, open(module_name,'w') as outf:
+  a = f.read()
+  outf.write(a.decode('utf-8'))
+
+# helper function to save predictions to an output file
+def labels2file(p, outf_path):
+	with open(outf_path,'w') as outf:
+		for pi in p:
+			outf.write(','.join([str(k) for k in pi])+'\n')
+
+from dont_patronize_me import DontPatronizeMe
+
+dpm = DontPatronizeMe('.', '.')
+
+dpm.load_task1()
+dpm.load_task2(return_one_hot=True)
+
+trids = pd.read_csv('train_semeval_parids-labels.csv')
+teids = pd.read_csv('dev_semeval_parids-labels.csv')
+
+trids.head()
+
+trids.par_id = trids.par_id.astype(str)
+teids.par_id = teids.par_id.astype(str)
+
+"""# Rebuild training set (Task 1)"""
+
+rows = [] # will contain par_id, label and text
+for idx in range(len(trids)):  
+  parid = trids.par_id[idx]
+  #print(parid)
+  # select row from original dataset to retrieve `text` and binary label
+  text = dpm.train_task1_df.loc[dpm.train_task1_df.par_id == parid].text.values[0]
+  label = dpm.train_task1_df.loc[dpm.train_task1_df.par_id == parid].label.values[0]
+  rows.append({
+      'par_id':parid,
+      'text':text,
+      'label':label
+  })
+
+trdf1 = pd.DataFrame(rows)
+
+"""# Rebuild test set (Task 1)"""
+
+test = pd.read_csv("task4_test.tsv", sep='\t',names=['par_id', 'art-id', 'keyword', 'country', 'text'])
+#new_column = pd.DataFrame({'par_id', 'art-id', 'keyword', 'country', 'text'})
+#test = pd.concat([new_row, test_file]).reset_index(drop = True)
+test.head()
+
+# displaying the DataFrame
+print(test)
+len(rows)
+
+len(rows)
+
+"""# RoBERTa Baseline for Task 1"""
+
+# downsample negative instances
+pcldf = trdf1[trdf1.label==1]
+npos = len(pcldf)
+
+training_set1 = pd.concat([pcldf,trdf1[trdf1.label==0][:npos*2]])
+
+task1_model_args = ClassificationArgs(num_train_epochs=5, 
+                                      eval_batch_size=32,
+                                      train_batch_size=32,
+                                      # learning_rate= 1e-05,
+                                      # weight_decay= 0.0,
+                                      # adam_epsilon= 1e-08,
+                                      # max_grad_norm= 1.0,
+                                      # per_device_train_batch_size= 32,
+                                      # train_batch_size= 32,
+                                      # gradient_accumulation_steps= 1,
+                                      # warmup_steps= 3500,
+                                      # seed= 42,
+                                      no_save=True, 
+                                      no_cache=True, 
+                                      overwrite_output_dir=True)
+task1_model = ClassificationModel("distilbert", 
+                                  'distilbert-base-uncased', 
+                                  args = task1_model_args, 
+                                  num_labels=2, 
+                                  use_cuda=cuda_available)
+
+#def train():
+    # Initialize a new wandb run
+    #wandb.init()
+
+   #)
+    # Sync wandb
+    #wandb.join()
+
+#wandb.agent(sweep_id, train)
+
+# train model
+task1_model.train_model(training_set1[['text', 'label']])
+# run predictions
+preds_task1, _ = task1_model.predict(test.text.tolist())
+
+labels2file([[k] for k in preds_task1], os.path.join('task1.txt'))
+
+import sys
+import os
+import os.path
+from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
+import numpy as np
+
+"""## Evaluation"""
+
+#Evaluation
+
+module_url = f"https://raw.githubusercontent.com/Perez-AlmendrosC/dontpatronizeme/master/semeval-2022/evaluation.py"
+module_name = module_url.split('/')[-1]
+print(f'Fetching {module_url}')
+#with open("file_1.txt") as f1, open("file_2.txt") as f2
+with request.urlopen(module_url) as f, open(module_name,'w') as outf:
+  a = f.read()
+  outf.write(a.decode('utf-8'))
+
+"""# Rebuild training set (Task 2)"""
+
+rows2 = [] # will contain par_id, label and text
+for idx in range(len(trids)):  
+  parid = trids.par_id[idx]
+  label = trids.label[idx]
+  # select row from original dataset to retrieve the `text` value
+  text = dpm.train_task1_df.loc[dpm.train_task1_df.par_id == parid].text.values[0]
+  rows2.append({
+      'par_id':parid,
+      'text':text,
+      'label':label
+  })
+
+trdf2 = pd.DataFrame(rows2)
+
+trdf2
+
+trdf2.label = trdf2.label.apply(literal_eval)
+
+"""# Rebuild test set (Task 2)"""
+
+rows2 = [] # will contain par_id, label and text
+for idx in range(len(teids)):  
+  parid = teids.par_id[idx]
+  label = teids.label[idx]
+  #print(parid)
+  # select row from original dataset to access the `text` value
+  text = dpm.train_task1_df.loc[dpm.train_task1_df.par_id == parid].text.values[0]
+  rows2.append({
+      'par_id':parid,
+      'text':text,
+      'label':label
+  })
+
+tedf2 = pd.DataFrame(rows2)
+
+tedf2
+
+tedf2.label = tedf2.label.apply(literal_eval)
+
+"""# RoBERTa baseline for Task 2"""
+
+all_negs = trdf2[trdf2.label.apply(lambda x:sum(x) == 0)]
+all_pos = trdf2[trdf2.label.apply(lambda x:sum(x) > 0)]
+
+training_set2 = pd.concat([all_pos,all_negs[:round(len(all_pos)*0.5)]])
+
+training_set2
+
+task2_model_args = MultiLabelClassificationArgs(num_train_epochs=20,
+                                                no_save=True, 
+                                                no_cache=True, 
+                                                overwrite_output_dir=True,
+                                                eval_batch_size = 64,
+                                                # evaluate_during_training = True,
+                                                # evaluate_during_training_silent = False,
+                                                # evaluate_during_training_steps = -1,
+                                                save_eval_checkpoints = False,
+                                                save_model_every_epoch = False,
+                                                learning_rate = 1e-5,
+                                                manual_seed = 4,
+                                                max_seq_length = 256,
+                                                multiprocessing_chunksize = 5000,
+                                                reprocess_input_data = True,
+                                                train_batch_size = 16,
+                                                gradient_accumulation_steps = 2,
+                                                labels_list = ["not_entailment", "entailment"],
+                                                output_dir = "default_output",
+                                                best_model_dir = "default_output/best_model",
+                                                wandb_project = "RTE - Hyperparameter Optimization",
+                                                wandb_kwargs = {"name": "default"}
+
+                                                )
+task2_model = MultiLabelClassificationModel("distilbert", 
+                                            'distilbert-base-uncased', 
+                                            num_labels=7,
+                                            args = task2_model_args, 
+                                            use_cuda=cuda_available)
+# train model
+task2_model.train_model(training_set2[['text', 'label']])
+# run predictions
+preds_task2, _ = task2_model.predict(test.text.tolist())
+
+labels2file(preds_task2, os.path.join('task2.txt'))
+
+import sys
+import os
+import os.path
+from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
+import numpy as np
+
+"""## Prepare submission"""
+
+!cat task1.txt | head -n 10
+
+!cat task2.txt | head -n 10
+
+!zip submission.zip task1.txt task2.txt
