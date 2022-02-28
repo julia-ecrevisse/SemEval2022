@@ -1,1 +1,1 @@
-# SemEval2022
+# SemEval-2022 task 4
